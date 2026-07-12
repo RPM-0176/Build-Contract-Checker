@@ -1,1 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Build Contract Checker — Radius PG</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="mast">
+  <div class="inner">
+    <p class="eyebrow">Radius PG · Development Advisory</p>
+    <h1>Build Contract Checker</h1>
+    <p class="lede">Upload the contract, working drawings and feasibility. The tool runs a two-pass contract analysis, cross-checks inclusions against the drawings and excluded costs against the feasibility, then hands you a review where only the <b>flagged exceptions</b> need a human eye. Everything cites a page or clause. It's a fast, cited draft — confirm the exceptions before relying on it.</p>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="uploads" id="uploads">
+    <div class="drop" data-field="contract">
+      <div class="drop-num">01</div>
+      <div class="drop-body">
+        <h3>Building contract <span class="req">required</span></h3>
+        <p>Contract, special conditions & specification (PDF).</p>
+        <label class="pick">Choose PDF<input type="file" accept="application/pdf" data-input="contract"></label>
+        <div class="fname" data-name="contract"></div>
+      </div>
+    </div>
+    <div class="drop" data-field="drawings">
+      <div class="drop-num">02</div>
+      <div class="drop-body">
+        <h3>Working drawings <span class="opt">recommended</span></h3>
+        <p>Architectural / working set (PDF, ~35–50 pp). Indexed, then checked sheet-by-sheet.</p>
+        <label class="pick">Choose PDF<input type="file" accept="application/pdf" data-input="drawings"></label>
+        <div class="fname" data-name="drawings"></div>
+      </div>
+    </div>
+    <div class="drop" data-field="feasibility">
+      <div class="drop-num">03</div>
+      <div class="drop-body">
+        <h3>Site feasibility <span class="opt">recommended</span></h3>
+        <p>Development feasibility (PDF) — to check excluded costs are carried.</p>
+        <label class="pick">Choose PDF<input type="file" accept="application/pdf" data-input="feasibility"></label>
+        <div class="fname" data-name="feasibility"></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="runbar">
+    <button id="run" class="run" disabled>Run review</button>
+    <button id="open" class="ghost">Open a saved review</button>
+    <span class="hint">Two-pass analysis + drawing indexing takes 1–3 minutes. Keep this tab open.</span>
+  </div>
+
+  <div id="status" class="status-box" hidden></div>
+  <div id="workspace" class="workspace" hidden></div>
+</main>
+
+<footer class="foot"><span>Radius PG · AI-assisted contract review. A cited draft, not legal advice — confirm exceptions before relying on it.</span></footer>
+
+<input type="file" id="file-in" accept="application/json,.json" style="display:none">
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
 
