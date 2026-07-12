@@ -17,23 +17,107 @@ document.querySelectorAll('[data-input]').forEach(inp => {
   });
 });
 
-run.addEventListener('click', async () => {
+run.addEventListener('click', runReview);
+
+async function runReview() {
   if (!files.contract) return;
   run.disabled = true; ws.hidden = true; ws.innerHTML = '';
-  const steps = ['Reading the contract (pass 1 of 2)…', 'Second-pass audit — catching misses…', files.drawings ? 'Indexing the drawing set…' : null, files.drawings ? 'Checking inclusions against drawings…' : null, files.feasibility ? 'Checking excluded costs vs feasibility…' : null].filter(Boolean);
-  showStatus(false, 'Running review…', steps);
-  const fd = new FormData();
-  fd.append('contract', files.contract);
-  if (files.drawings) fd.append('drawings', files.drawings);
-  if (files.feasibility) fd.append('feasibility', files.feasibility);
+
+  // Build the step plan based on what was uploaded
+  const plan = [{ key: 'extract', label: 'Reading the contract (pass 1 of 2)' },
+                { key: 'audit', label: 'Second-pass audit — catching misses' }];
+  if (files.drawings) plan.push({ key: 'dindex', label: 'Indexing the drawing set' }, { key: 'dcheck', label: 'Checking inclusions against drawings' });
+  if (files.feasibility) plan.push({ key: 'feas', label: 'Checking excluded costs vs feasibility' });
+  plan.push({ key: 'assemble', label: 'Assembling the review' });
+  const stepState = {}; plan.forEach(s => stepState[s.key] = 'pending');
+  const setStep = (k, st) => { stepState[k] = st; renderSteps(plan, stepState); };
+  renderSteps(plan, stepState);
+
+  const analysis = {}; const warnings = [];
+
+  // 1) Extract (critical)
+  setStep('extract', 'running');
   try {
-    const res = await fetch('/api/analyze', { method: 'POST', body: fd });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Analysis failed.');
-    statusBox.hidden = true; DATA = data; renderWorkspace(data);
-  } catch (err) { showStatus(true, err.message || 'Something went wrong.'); }
+    const r = await postForm('/api/extract', { contract: files.contract });
+    analysis.extract = r.data;
+    if (r.data.parseError) { setStep('extract', 'failed'); return showStatus(true, 'The contract could not be read on this run. Please try Run review again.'); }
+    if (r.truncated) warnings.push('The contract was long and the read was slightly cut off; partial data recovered. Consider re-running.');
+    setStep('extract', 'done');
+  } catch (e) { setStep('extract', 'failed'); return showStatus(true, 'Contract read failed: ' + e.message + ' — try again.'); }
+
+  // 2) Audit (non-critical)
+  setStep('audit', 'running');
+  try {
+    const r = await postForm('/api/audit', { contract: files.contract, extract: JSON.stringify(analysis.extract) });
+    if (r.data.parseError) { analysis.audit = {}; warnings.push('The second-pass audit could not be read this run; the main analysis still ran (it already catches blanks and conflicts).'); setStep('audit', 'warn'); }
+    else { analysis.audit = r.data; setStep('audit', 'done'); }
+  } catch (e) { analysis.audit = {}; warnings.push('Second-pass audit step failed (' + e.message + '); the main analysis still ran.'); setStep('audit', 'warn'); }
+
+  // 3) Drawings
+  if (files.drawings) {
+    setStep('dindex', 'running');
+    let index = null;
+    try {
+      const r = await postForm('/api/drawings-index', { drawings: files.drawings });
+      index = r.data; analysis.drawingsIndex = r.data; setStep('dindex', 'done');
+    } catch (e) { warnings.push('Drawing indexing failed (' + e.message + ').'); setStep('dindex', 'failed'); }
+    setStep('dcheck', 'running');
+    try {
+      const inclusions = (analysis.extract.inclusions || []).map(x => (x && x.item) ? x.item : x).filter(Boolean);
+      const r = await postForm('/api/drawings-check', { drawings: files.drawings, index: JSON.stringify(index || {}), inclusions: JSON.stringify(inclusions) });
+      analysis.drawingsCheck = r.data; setStep('dcheck', r.data && r.data.parseError ? 'warn' : 'done');
+      if (r.data && r.data.parseError) warnings.push('Drawings cross-check could not be read this run.');
+    } catch (e) { warnings.push('Drawings cross-check failed (' + e.message + ').'); setStep('dcheck', 'failed'); }
+  }
+
+  // 4) Feasibility
+  if (files.feasibility) {
+    setStep('feas', 'running');
+    try {
+      const exclusions = (analysis.extract.exclusions || []).map(x => (x && x.item) ? x.item : x).filter(Boolean);
+      const r = await postForm('/api/feasibility', { feasibility: files.feasibility, exclusions: JSON.stringify(exclusions) });
+      analysis.feasibilityCheck = r.data; setStep('feas', r.data && r.data.parseError ? 'warn' : 'done');
+      if (r.data && r.data.parseError) warnings.push('Feasibility cross-check could not be read this run.');
+    } catch (e) { warnings.push('Feasibility cross-check failed (' + e.message + ').'); setStep('feas', 'failed'); }
+  }
+
+  // 5) Assemble
+  setStep('assemble', 'running');
+  try {
+    const docs = { contract: files.contract.name, drawings: files.drawings ? files.drawings.name : null, feasibility: files.feasibility ? files.feasibility.name : null };
+    const rep = await postJson('/api/assemble', { analysis, warnings, docs });
+    setStep('assemble', 'done');
+    statusBox.hidden = true; DATA = rep; renderWorkspace(rep);
+  } catch (e) { setStep('assemble', 'failed'); showStatus(true, 'Could not assemble the report: ' + e.message); }
   finally { run.disabled = !files.contract; }
-});
+}
+
+function renderSteps(plan, state) {
+  statusBox.hidden = false; statusBox.className = 'status-box';
+  const running = plan.some(s => state[s.key] === 'running');
+  const rows = plan.map(s => {
+    const st = state[s.key];
+    const icon = st === 'done' ? '✓' : st === 'failed' ? '✕' : st === 'warn' ? '!' : st === 'running' ? '<span class="mini-spin"></span>' : '·';
+    const cls = st === 'done' ? 'sd-done' : st === 'failed' ? 'sd-fail' : st === 'warn' ? 'sd-warn' : st === 'running' ? 'sd-run' : 'sd-pend';
+    return `<div class="step-row ${cls}"><span class="step-ic">${icon}</span>${esc(s.label)}</div>`;
+  }).join('');
+  statusBox.innerHTML = `<div style="width:100%"><div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">${running ? '<div class="spinner"></div>' : ''}<b>Running review…</b></div><div class="step-list">${rows}</div></div>`;
+}
+
+async function postForm(url, fields) {
+  const fd = new FormData();
+  for (const [k, v] of Object.entries(fields)) fd.append(k, v);
+  const res = await fetch(url, { method: 'POST', body: fd });
+  let data; try { data = await res.json(); } catch (e) { throw new Error('server returned an unreadable response'); }
+  if (!res.ok) throw new Error(data.error || 'request failed');
+  return data;
+}
+async function postJson(url, obj) {
+  const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(obj) });
+  let data; try { data = await res.json(); } catch (e) { throw new Error('server returned an unreadable response'); }
+  if (!res.ok) throw new Error(data.error || 'request failed');
+  return data;
+}
 
 document.getElementById('open').addEventListener('click', () => document.getElementById('file-in').click());
 document.getElementById('file-in').addEventListener('change', e => {
@@ -280,4 +364,3 @@ async function downloadAllTrades(trades, proj) {
 function slug(s) { return String(s || 'project').replace(/[^\w\-]+/g, '-').slice(0, 40).replace(/^-+|-+$/g, ''); }
 function fileName(proj, trade) { return 'BOM-' + slug(proj) + '-' + slug(trade); }
 function sheetName(s) { return String(s || 'Trade').replace(/[\\/?*[\]:]/g, '').slice(0, 31); }
-
