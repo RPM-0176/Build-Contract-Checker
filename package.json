@@ -1,0 +1,17 @@
+{
+  "name": "radius-contract-checker",
+  "version": "1.0.0",
+  "description": "Upload a building contract, working drawings and site feasibility, and get an AI-assisted review with cross-checks. Radius PG.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^2.0.1"
+  }
+}
