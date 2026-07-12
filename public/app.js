@@ -276,16 +276,18 @@ function escAttr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;').
 let BOM = null;
 async function runBom() {
   const panel = document.getElementById('bom-panel');
-  if (!files.drawings) {
+  const inclusions = (DATA && DATA.analysis && DATA.analysis.extract && DATA.analysis.extract.inclusions) || [];
+  if (!files.drawings && !files.contract) {
     panel.hidden = false;
-    panel.innerHTML = `<div class="note-strip">Working drawings are needed for a bill of materials. Upload the drawings and run the review, then generate the BOM.</div>`;
+    panel.innerHTML = `<div class="note-strip">Run a review first (with the drawings and contract) so the bill of materials can be built from the extracted inclusions.</div>`;
     return;
   }
   panel.hidden = false;
-  panel.innerHTML = `<div class="bom-loading"><div class="spinner"></div><span>Reading the drawings and specification, building the trade schedules… this takes a minute.</span></div>`;
+  panel.innerHTML = `<div class="bom-loading"><div class="spinner"></div><span>Building the trade schedules from the contract inclusions and drawings… this takes a minute.</span></div>`;
   const fd = new FormData();
-  fd.append('drawings', files.drawings);
+  if (files.drawings) fd.append('drawings', files.drawings);
   if (files.contract) fd.append('contract', files.contract);
+  fd.append('inclusions', JSON.stringify(inclusions));
   try {
     const res = await fetch('/api/bom', { method: 'POST', body: fd });
     const data = await res.json();
