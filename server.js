@@ -27,10 +27,12 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '12mb' }));
 
 // ---------- Claude helper (with prompt caching on documents) ----------
-async function callClaude(system, userContent, maxTokens = 6000) {
+async function callClaude(system, userContent, maxTokens = 6000, prefill) {
   if (!API_KEY) throw new Error('ANTHROPIC_API_KEY is not set on the server.');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 300000); // 5 min
+  const messages = [{ role: 'user', content: userContent }];
+  if (prefill) messages.push({ role: 'assistant', content: [{ type: 'text', text: prefill }] });
   let res;
   try {
     res = await fetch(API_URL, {
@@ -41,12 +43,14 @@ async function callClaude(system, userContent, maxTokens = 6000) {
         'anthropic-version': ANTHROPIC_VERSION,
         'content-type': 'application/json'
       },
-      body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, system, messages: [{ role: 'user', content: userContent }] })
+      body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, system, messages })
     });
   } finally { clearTimeout(timeout); }
   if (!res.ok) { const t = await res.text(); throw new Error(`Anthropic API ${res.status}: ${t.slice(0, 600)}`); }
   const data = await res.json();
-  return (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+  let text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+  if (prefill) text = prefill + text; // stitch the forced opening back on
+  return text;
 }
 
 function parseJson(text) {
@@ -356,8 +360,12 @@ app.post('/api/audit', uploadOne('contract'), async (req, res) => {
     if (!contract) return fail(res, 400, 'A contract PDF is required.');
     let extract = {};
     try { extract = JSON.parse(req.body.extract || '{}'); } catch (e) {}
-    const auditInstruction = `The first reviewer produced this (JSON):\n${JSON.stringify(extract).slice(0, 12000)}\n\nRe-read the contract yourself and return JSON:\n{\n  "corrections": [ { "field": string, "pass1Value": string, "auditValue": string, "page": string|null, "why": string, "conf": "high"|"medium"|"low" } ],\n  "additionalRedFlags": [ { "issue": string, "clause": string|null, "page": string|null, "severity": "high"|"medium"|"low", "why": string, "conf": "high"|"medium"|"low" } ],\n  "blanksAndMandatoryGaps": [ { "field": string, "page": string|null, "note": string } ],\n  "crossReferenceErrors": [ { "clauseCiting": string, "citedClause": string, "page": string|null, "note": string } ],\n  "internalConflicts": [ { "between": string, "page": string|null, "note": string } ],\n  "agreementNote": string\n}`;
-    const data = parseJson(await callClaude(AUDIT_SYSTEM, [docBlock(contract, true), { type: 'text', text: auditInstruction }], 12000));
+    // Pass a COMPACT summary of pass 1 (not the whole JSON) so the model isn't choking on a huge blob
+    const flagList = (Array.isArray(extract.redFlags) ? extract.redFlags : [])
+      .map(r => `- ${r.issue || ''}${r.clause ? ' [' + r.clause + ']' : ''}`).join('\n').slice(0, 3000);
+    const auditInstruction = `A first reviewer already flagged these issues in this contract:\n${flagList || '(none provided)'}\n\nRe-read the contract independently and report anything they MISSED or got wrong. Return a single JSON object with these keys (use empty arrays where you have nothing to add):\n{\n  "corrections": [ { "field": string, "pass1Value": string, "auditValue": string, "page": string, "why": string, "conf": "high"|"medium"|"low" } ],\n  "additionalRedFlags": [ { "issue": string, "clause": string, "page": string, "severity": "high"|"medium"|"low", "why": string, "conf": "high"|"medium"|"low" } ],\n  "blanksAndMandatoryGaps": [ { "field": string, "page": string, "note": string } ],\n  "crossReferenceErrors": [ { "clauseCiting": string, "citedClause": string, "page": string, "note": string } ],\n  "internalConflicts": [ { "between": string, "page": string, "note": string } ],\n  "agreementNote": string\n}\nOutput ONLY the JSON object.`;
+    // prefill '{' forces a valid JSON start and eliminates empty/preamble responses
+    const data = parseJson(await callClaude(AUDIT_SYSTEM, [docBlock(contract, true), { type: 'text', text: auditInstruction }], 8000, '{'));
     ok(res, data, { truncated: !!data.__truncated });
   } catch (err) { console.error(err); fail(res, 500, err.message || 'Audit failed.'); }
 });
