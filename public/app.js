@@ -24,8 +24,7 @@ async function runReview() {
   run.disabled = true; ws.hidden = true; ws.innerHTML = '';
 
   // Build the step plan based on what was uploaded
-  const plan = [{ key: 'extract', label: 'Reading the contract (pass 1 of 2)' },
-                { key: 'audit', label: 'Second-pass audit — catching misses' }];
+  const plan = [{ key: 'extract', label: 'Reading the contract' }];
   if (files.drawings) plan.push({ key: 'dindex', label: 'Indexing the drawing set' }, { key: 'dcheck', label: 'Checking inclusions against drawings' });
   if (files.feasibility) plan.push({ key: 'feas', label: 'Checking excluded costs vs feasibility' });
   plan.push({ key: 'assemble', label: 'Assembling the review' });
@@ -44,14 +43,6 @@ async function runReview() {
     if (r.truncated) warnings.push('The contract was long and the read was slightly cut off; partial data recovered. Consider re-running.');
     setStep('extract', 'done');
   } catch (e) { setStep('extract', 'failed'); return showStatus(true, 'Contract read failed: ' + e.message + ' — try again.'); }
-
-  // 2) Audit (non-critical)
-  setStep('audit', 'running');
-  try {
-    const r = await postForm('/api/audit', { contract: files.contract, extract: JSON.stringify(analysis.extract) });
-    if (r.data.parseError) { analysis.audit = r.data; warnings.push('The second-pass audit could not be read this run; the main analysis still ran (it already catches blanks and conflicts).'); setStep('audit', 'warn'); }
-    else { analysis.audit = r.data; setStep('audit', 'done'); }
-  } catch (e) { analysis.audit = {}; warnings.push('Second-pass audit step failed (' + e.message + '); the main analysis still ran.'); setStep('audit', 'warn'); }
 
   // 3) Drawings
   if (files.drawings) {
@@ -168,7 +159,6 @@ function renderWorkspace(d) {
   parts.push(`<div id="bom-panel" class="bom-panel" hidden></div>`);
 
   if (d.warnings && d.warnings.length) parts.push(`<div class="note-strip"><b>Processing note:</b> ${d.warnings.map(esc).join(' ')}</div>`);
-  if (d.review && d.review.agreementNote) parts.push(`<div class="note-strip"><b>Second-pass summary:</b> ${esc(d.review.agreementNote)}</div>`);
 
   const items = (d.review && d.review.items) || [];
   const exceptions = items.filter(i => i.exception);
