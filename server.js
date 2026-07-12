@@ -24,7 +24,7 @@ const ANTHROPIC_VERSION = '2023-06-01';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 32 * 1024 * 1024, files: 3 } });
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '12mb' }));
 
 // ---------- Claude helper (with prompt caching on documents) ----------
 async function callClaude(system, userContent, maxTokens = 6000) {
@@ -188,7 +188,28 @@ Return JSON:
 function cite(o) {
   if (o == null) return { v: null, page: null, clause: null, conf: 'low' };
   if (typeof o === 'string' || typeof o === 'number') return { v: o, page: null, clause: null, conf: 'medium' };
-  return { v: o.v !== undefined ? o.v : (o.value !== undefined ? o.value : null), page: o.page || null, clause: o.clause || null, conf: o.conf || o.confidence || 'medium' };
+  // direct citation object
+  if ('v' in o || 'value' in o) {
+    const val = o.v !== undefined ? o.v : o.value;
+    return { v: (val === undefined ? null : val), page: o.page || null, clause: o.clause || null, conf: o.conf || o.confidence || 'medium' };
+  }
+  // nested: the model sometimes returns e.g. { name:{v..}, acn:{v..} } — prefer a meaningful child
+  const preferKeys = ['name', 'summary', 'amount', 'value', 'period', 'periodWeeks', 'securityForPerformance', 'cashRetention'];
+  for (const k of preferKeys) {
+    if (o[k] && typeof o[k] === 'object' && ('v' in o[k] || 'value' in o[k])) {
+      const c = cite(o[k]);
+      if (c.v != null && c.v !== '') return c;
+    }
+  }
+  // otherwise first child that carries a non-null value
+  for (const k of Object.keys(o)) {
+    if (o[k] && typeof o[k] === 'object' && ('v' in o[k] || 'value' in o[k])) {
+      const c = cite(o[k]);
+      if (c.v != null && c.v !== '') return c;
+    }
+  }
+  // nothing usable
+  return { v: null, page: o.page || null, clause: o.clause || null, conf: o.conf || 'low' };
 }
 let RID = 0; const rid = () => 'r' + (++RID);
 function mk(group, label, c, finding, forceStatus) {
@@ -311,55 +332,82 @@ function buildReview(a) {
   return { items, blindSpots, agreementNote: audit.agreementNote || null };
 }
 
-// ---------- Route ----------
-app.post('/api/analyze', upload.fields([{ name: 'contract', maxCount: 1 }, { name: 'drawings', maxCount: 1 }, { name: 'feasibility', maxCount: 1 }]), async (req, res) => {
+// ---------- Per-step endpoints (each is ONE Claude call, so nothing times out) ----------
+const uploadOne = f => upload.fields([{ name: f, maxCount: 1 }]);
+
+// helper: always respond with clean JSON, even on failure
+function ok(res, data, extra) { res.json(Object.assign({ data }, extra || {})); }
+function fail(res, code, msg) { res.status(code).json({ error: msg }); }
+
+// 1) Contract extract
+app.post('/api/extract', uploadOne('contract'), async (req, res) => {
   try {
-    const f = req.files || {};
-    const contract = f.contract && f.contract[0];
-    const drawings = f.drawings && f.drawings[0];
-    const feasibility = f.feasibility && f.feasibility[0];
-    if (!contract) return res.status(400).json({ error: 'A contract PDF is required.' });
+    const contract = req.files && req.files.contract && req.files.contract[0];
+    if (!contract) return fail(res, 400, 'A contract PDF is required.');
+    const data = parseJson(await callClaude(EXTRACT_SYSTEM, [docBlock(contract, true), { type: 'text', text: EXTRACT_INSTRUCTION }], 16000));
+    ok(res, data, { truncated: !!data.__truncated });
+  } catch (err) { console.error(err); fail(res, 500, err.message || 'Extraction failed.'); }
+});
 
-    const analysis = {}; const warnings = [];
+// 2) Contract audit (independent second read)
+app.post('/api/audit', uploadOne('contract'), async (req, res) => {
+  try {
+    const contract = req.files && req.files.contract && req.files.contract[0];
+    if (!contract) return fail(res, 400, 'A contract PDF is required.');
+    let extract = {};
+    try { extract = JSON.parse(req.body.extract || '{}'); } catch (e) {}
+    const auditInstruction = `The first reviewer produced this (JSON):\n${JSON.stringify(extract).slice(0, 12000)}\n\nRe-read the contract yourself and return JSON:\n{\n  "corrections": [ { "field": string, "pass1Value": string, "auditValue": string, "page": string|null, "why": string, "conf": "high"|"medium"|"low" } ],\n  "additionalRedFlags": [ { "issue": string, "clause": string|null, "page": string|null, "severity": "high"|"medium"|"low", "why": string, "conf": "high"|"medium"|"low" } ],\n  "blanksAndMandatoryGaps": [ { "field": string, "page": string|null, "note": string } ],\n  "crossReferenceErrors": [ { "clauseCiting": string, "citedClause": string, "page": string|null, "note": string } ],\n  "internalConflicts": [ { "between": string, "page": string|null, "note": string } ],\n  "agreementNote": string\n}`;
+    const data = parseJson(await callClaude(AUDIT_SYSTEM, [docBlock(contract, true), { type: 'text', text: auditInstruction }], 12000));
+    ok(res, data, { truncated: !!data.__truncated });
+  } catch (err) { console.error(err); fail(res, 500, err.message || 'Audit failed.'); }
+});
 
-    // 1) Extract (pass 1)
-    const p1 = parseJson(await callClaude(EXTRACT_SYSTEM, [docBlock(contract, true), { type: 'text', text: EXTRACT_INSTRUCTION }], 16000));
-    if (p1.parseError) warnings.push('Contract extraction could not be read (unparseable response) — treat this run as incomplete and re-run.');
-    else if (p1.__truncated) warnings.push('Contract extraction was long and got cut off; partial data was recovered — some items near the end may be missing. Consider re-running.');
-    analysis.extract = p1;
+// 3) Drawings index
+app.post('/api/drawings-index', uploadOne('drawings'), async (req, res) => {
+  try {
+    const drawings = req.files && req.files.drawings && req.files.drawings[0];
+    if (!drawings) return fail(res, 400, 'A drawings PDF is required.');
+    const data = parseJson(await callClaude(DRAW_INDEX_SYSTEM, [docBlock(drawings, true), { type: 'text', text: 'Return JSON: { "sheets": [ { "page": string, "sheetNo": string|null, "title": string, "contains": [string] } ], "schedules": { "window": string|null, "door": string|null, "finishes": string|null, "electrical": string|null } } (page = page number/label where each schedule is found).' }], 8000));
+    ok(res, data, { truncated: !!data.__truncated });
+  } catch (err) { console.error(err); fail(res, 500, err.message || 'Drawings indexing failed.'); }
+});
 
-    // 2) Audit (pass 2) — reuses cached contract
-    const auditInstruction = `The first reviewer produced this (JSON):\n${JSON.stringify(p1).slice(0, 12000)}\n\nRe-read the contract yourself and return JSON:\n{\n  "corrections": [ { "field": string, "pass1Value": string, "auditValue": string, "page": string|null, "why": string, "conf": "high"|"medium"|"low" } ],\n  "additionalRedFlags": [ { "issue": string, "clause": string|null, "page": string|null, "severity": "high"|"medium"|"low", "why": string, "conf": "high"|"medium"|"low" } ],\n  "blanksAndMandatoryGaps": [ { "field": string, "page": string|null, "note": string } ],\n  "crossReferenceErrors": [ { "clauseCiting": string, "citedClause": string, "page": string|null, "note": string } ],\n  "internalConflicts": [ { "between": string, "page": string|null, "note": string } ],\n  "agreementNote": string\n}`;
-    const p2 = parseJson(await callClaude(AUDIT_SYSTEM, [docBlock(contract, true), { type: 'text', text: auditInstruction }], 12000));
-    if (p2.parseError) warnings.push('Contract audit could not be read (unparseable response).');
-    else if (p2.__truncated) warnings.push('Contract audit got cut off; partial data recovered.');
-    analysis.audit = p2;
+// 4) Drawings cross-check
+app.post('/api/drawings-check', uploadOne('drawings'), async (req, res) => {
+  try {
+    const drawings = req.files && req.files.drawings && req.files.drawings[0];
+    if (!drawings) return fail(res, 400, 'A drawings PDF is required.');
+    let index = {}, inclusions = [];
+    try { index = JSON.parse(req.body.index || '{}'); } catch (e) {}
+    try { inclusions = JSON.parse(req.body.inclusions || '[]'); } catch (e) {}
+    if (!inclusions.length) return ok(res, { skipped: true, reason: 'No inclusions to check.' });
+    const dInstr = `INDEX OF THE DRAWING SET:\n${JSON.stringify(index).slice(0, 8000)}\n\nCONTRACT INCLUSIONS TO VERIFY (cite the sheet/page for each):\n${inclusions.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nReturn JSON: { "checks": [ { "item": string, "status": "supported"|"conflict"|"not_found", "page": string|null, "sheet": string|null, "confidence": "high"|"medium"|"low", "note": string } ], "notableOnDrawingsNotInContract": [ { "item": string, "page": string|null } ] }`;
+    const data = parseJson(await callClaude(DRAW_CHECK_SYSTEM, [docBlock(drawings, true), { type: 'text', text: dInstr }], 12000));
+    ok(res, data, { truncated: !!data.__truncated });
+  } catch (err) { console.error(err); fail(res, 500, err.message || 'Drawings cross-check failed.'); }
+});
 
-    const inclusions = Array.isArray(p1.inclusions) ? p1.inclusions.map(x => x.item) : [];
-    const exclusions = Array.isArray(p1.exclusions) ? p1.exclusions.map(x => x.item) : [];
+// 5) Feasibility cross-check
+app.post('/api/feasibility', uploadOne('feasibility'), async (req, res) => {
+  try {
+    const feasibility = req.files && req.files.feasibility && req.files.feasibility[0];
+    if (!feasibility) return fail(res, 400, 'A feasibility PDF is required.');
+    let exclusions = [];
+    try { exclusions = JSON.parse(req.body.exclusions || '[]'); } catch (e) {}
+    if (!exclusions.length) return ok(res, { skipped: true, reason: 'No exclusions to check.' });
+    const fInstr = `CONTRACT-EXCLUDED ITEMS:\n${exclusions.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nReturn JSON: { "checks": [ { "excludedItem": string, "inFeasibility": "yes"|"no"|"unclear", "page": string|null, "confidence": "high"|"medium"|"low", "note": string } ], "overallNote": string }`;
+    const data = parseJson(await callClaude(FEAS_SYSTEM, [docBlock(feasibility, false), { type: 'text', text: fInstr }], 10000));
+    ok(res, data, { truncated: !!data.__truncated });
+  } catch (err) { console.error(err); fail(res, 500, err.message || 'Feasibility cross-check failed.'); }
+});
 
-    // 3+4) Drawings
-    if (drawings) {
-      const idx = parseJson(await callClaude(DRAW_INDEX_SYSTEM, [docBlock(drawings, true), { type: 'text', text: 'Return JSON: { "sheets": [ { "page": string, "sheetNo": string|null, "title": string, "contains": [string] } ], "schedules": { "window": string|null, "door": string|null, "finishes": string|null, "electrical": string|null } } (page = page number/label where each schedule is found).' }], 6000));
-      analysis.drawingsIndex = idx;
-      if (inclusions.length) {
-        const dInstr = `INDEX OF THE DRAWING SET:\n${JSON.stringify(idx).slice(0, 8000)}\n\nCONTRACT INCLUSIONS TO VERIFY (cite the sheet/page for each):\n${inclusions.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nReturn JSON: { "checks": [ { "item": string, "status": "supported"|"conflict"|"not_found", "page": string|null, "sheet": string|null, "confidence": "high"|"medium"|"low", "note": string } ], "notableOnDrawingsNotInContract": [ { "item": string, "page": string|null } ] }`;
-        const dchk = parseJson(await callClaude(DRAW_CHECK_SYSTEM, [docBlock(drawings, true), { type: 'text', text: dInstr }], 12000));
-        if (dchk.parseError) warnings.push('Drawings cross-check returned non-JSON.');
-        analysis.drawingsCheck = dchk;
-      } else analysis.drawingsCheck = { skipped: true, reason: 'No inclusions extracted to check.' };
-    }
-
-    // 5) Feasibility
-    if (feasibility) {
-      if (exclusions.length) {
-        const fInstr = `CONTRACT-EXCLUDED ITEMS:\n${exclusions.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nReturn JSON: { "checks": [ { "excludedItem": string, "inFeasibility": "yes"|"no"|"unclear", "page": string|null, "confidence": "high"|"medium"|"low", "note": string } ], "overallNote": string }`;
-        const fchk = parseJson(await callClaude(FEAS_SYSTEM, [docBlock(feasibility, false), { type: 'text', text: fInstr }], 10000));
-        if (fchk.parseError) warnings.push('Feasibility cross-check returned non-JSON.');
-        analysis.feasibilityCheck = fchk;
-      } else analysis.feasibilityCheck = { skipped: true, reason: 'No exclusions extracted to check.' };
-    }
-
+// 6) Assemble — no model call, just merges the pieces into the review
+app.post('/api/assemble', (req, res) => {
+  try {
+    const analysis = (req.body && req.body.analysis) || {};
+    const warnings = (req.body && req.body.warnings) || [];
+    const docs = (req.body && req.body.docs) || {};
+    const p1 = analysis.extract || {};
     const review = buildReview(analysis);
     const meta = {
       proprietor: cite((p1.parties || {}).proprietor).v || '',
@@ -371,17 +419,12 @@ app.post('/api/analyze', upload.fields([{ name: 'contract', maxCount: 1 }, { nam
     };
     const total = review.items.length;
     const exceptions = review.items.filter(i => i.exception).length;
-
     res.json({
       model: MODEL, generatedAt: new Date().toISOString(), warnings,
-      docs: { contract: contract.originalname, drawings: drawings ? drawings.originalname : null, feasibility: feasibility ? feasibility.originalname : null },
-      meta, review, analysis,
+      docs, meta, review, analysis,
       counts: { total, exceptions, autoConfirmed: total - exceptions, blindSpots: review.blindSpots.length }
     });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message || 'Analysis failed.' });
-  }
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message || 'Assembly failed.' }); }
 });
 
 // ---------- Bill of materials ----------
@@ -405,4 +448,11 @@ app.post('/api/bom', upload.fields([{ name: 'contract', maxCount: 1 }, { name: '
 });
 
 app.get('/api/health', (req, res) => res.json({ ok: true, model: MODEL, keySet: !!API_KEY }));
+
+// Ensure any error (incl. bad JSON body / oversized upload) returns JSON, never an HTML page
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(err.status || 500).json({ error: err.message || 'Request failed.' });
+});
+
 app.listen(PORT, () => console.log(`Contract checker on :${PORT} (model ${MODEL}, key ${API_KEY ? 'set' : 'MISSING'})`));
