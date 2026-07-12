@@ -168,25 +168,29 @@ const DRAW_INDEX_SYSTEM = `You are cataloguing an architectural/working drawing 
 
 const DRAW_CHECK_SYSTEM = `You verify a building contract's stated inclusions against the working drawings. You get (a) an index of the drawing set with page numbers, (b) the list of contract inclusions, and (c) the drawings PDF. For each inclusion, decide whether the drawings support it, conflict with it, or don't show it — and CITE the sheet/page. Drawings are visual and use schedules, callouts and symbols; where you are not sure, say "not_found" and low confidence rather than guessing. "conflict" only when the drawings clearly show something different. Also list anything material on the drawings that is not in the contract inclusions. Return ONLY valid JSON. No markdown.`;
 
-const BOM_SYSTEM = `You are an Australian building estimator preparing a trade-by-trade materials & items schedule for a residential (often NDIS / SDA) dwelling, so trades can quote from it. You are given the working drawings and (optionally) the specification/contract.
+const BOM_SYSTEM = `You are an Australian building estimator preparing a trade-by-trade materials & items schedule for a residential (often NDIS / SDA) dwelling, so trades can quote from it. You are given: (a) a list of INCLUDED ITEMS already extracted from the contract and specification (with brands, categories and page references), and (b) the working drawings and/or specification PDF(s).
+
+Your job is to organise a COMPLETE schedule covering every trade, not just structural items.
 
 STRICT RULES — a wrong quantity sent to a trade is worse than no quantity:
-- List only items actually named, scheduled or shown in the documents. Never invent items.
-- Give a numeric quantity ONLY when a document explicitly states it (a schedule count, or a spec quantity like "4 drawers", "2 ensuites"). 
-- If a quantity would require measuring or taking off from the drawings (linear metres, m2, areas, or counts you would have to derive from geometry), set quantity to null, put the likely unit, and set needsTakeoff true. NEVER estimate dimensions, areas or counts.
-- Capture the specification/brand where stated (e.g. "Westinghouse 600mm induction cooktop", "Colorbond roof", "MDF 67x18 skirting").
-- Give the location/room where the document indicates it.
-- Cite the source for every line: sheet number/page for drawings, or the spec item.
-- Assign each item to the most appropriate trade.
+- Place EVERY provided included item into its correct trade. Keep the exact spec/brand and page.
+- Then ADD any further named/scheduled items visible in the drawings or spec that are not already covered — especially from the window/door schedule, electrical schedule/legend, and finishes schedule.
+- Give a numeric quantity ONLY when a document explicitly states it (a schedule count, or a spec quantity like "3 bedrooms", "2 ensuites"). Otherwise quantity null.
+- If a quantity would require measuring or taking off from the drawings (linear metres, m2, areas, or counts you would derive from geometry), set quantity null, put the likely unit, and set needsTakeoff true. NEVER estimate dimensions, areas or counts.
+- A named appliance, fixture or fitting (e.g. "Westinghouse 600mm cooktop") is a discrete item — quantity is usually as-stated or null; it does NOT need take-off.
+- Cite the source for every line: the page from the included item, or a sheet/page from the drawings.
 - Confidence: "high" if explicitly scheduled/specified; "low" if inferred.
 
 Return ONLY valid JSON. No markdown.`;
 
-const BOM_INSTRUCTION = `Group items under these trades where applicable (omit empty trades; use "Other" only if nothing fits):
-Site & Concrete; Framing & Carpentry; Roofing & Cladding; Windows & Doors; Electrical; Plumbing & Drainage; Heating & Cooling (HVAC); Kitchen & Joinery; Wet Areas & Tiling; Painting; Insulation; External, Fencing & Landscaping; SDA / Accessibility.
+const BOM_TRADES = `Site & Concrete; Framing & Carpentry; Roofing & Cladding; Windows & Doors; Electrical; Plumbing & Drainage; Heating & Cooling (HVAC); Kitchen & Joinery; Wet Areas & Tiling; Painting; Insulation; External, Fencing & Landscaping; SDA / Accessibility`;
 
-Return JSON:
-{ "trades": [ { "trade": string, "items": [ { "description": string, "spec": string|null, "location": string|null, "quantity": number|null, "unit": string|null, "needsTakeoff": boolean, "source": string|null, "confidence": "high"|"medium"|"low", "note": string|null } ] } ] }`;
+function bomInstruction(inclusions) {
+  const list = (inclusions && inclusions.length)
+    ? inclusions.map((x, i) => `${i + 1}. ${x.item || x}${x.category ? ' (' + x.category + ')' : ''}${x.page ? ' [p.' + x.page + ']' : ''}`).join('\n')
+    : '(none provided — extract items from the drawings and specification yourself)';
+  return `INCLUDED ITEMS (organise every one of these into the correct trade, keeping spec/brand and page):\n${list}\n\nTrades to use (omit any that end up empty; use "Other" only if nothing fits):\n${BOM_TRADES}\n\nReturn JSON:\n{ "trades": [ { "trade": string, "items": [ { "description": string, "spec": string|null, "location": string|null, "quantity": number|null, "unit": string|null, "needsTakeoff": boolean, "source": string|null, "confidence": "high"|"medium"|"low", "note": string|null } ] } ] }`;
+}
 
 // ---------- Merge into checklist-ready review ----------
 function cite(o) {
@@ -440,13 +444,17 @@ app.post('/api/bom', upload.fields([{ name: 'contract', maxCount: 1 }, { name: '
     const f = req.files || {};
     const drawings = f.drawings && f.drawings[0];
     const contract = f.contract && f.contract[0];
-    if (!drawings) return res.status(400).json({ error: 'Working drawings are required to build a bill of materials.' });
-    const content = [docBlock(drawings, true)];
+    let inclusions = [];
+    try { inclusions = JSON.parse(req.body.inclusions || '[]'); } catch (e) {}
+    if (!drawings && !contract) return res.status(400).json({ error: 'Upload drawings and/or the contract to build a bill of materials.' });
+    const content = [];
+    if (drawings) content.push(docBlock(drawings, true));
     if (contract) content.push(docBlock(contract, true));
-    content.push({ type: 'text', text: BOM_INSTRUCTION });
+    content.push({ type: 'text', text: bomInstruction(inclusions) });
     const bom = parseJson(await callClaude(BOM_SYSTEM, content, 16000));
     const warnings = [];
     if (bom.parseError) warnings.push('Bill of materials returned non-JSON.');
+    else if (bom.__truncated) warnings.push('Bill of materials was long and got cut off; partial data recovered.');
     res.json({ model: MODEL, generatedAt: new Date().toISOString(), warnings, bom });
   } catch (err) {
     console.error(err);
