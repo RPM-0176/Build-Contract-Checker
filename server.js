@@ -2,11 +2,11 @@
  * Radius PG — Build Contract Checker (hardened)
  *
  * Pipeline:
- *   1. Contract extract (pass 1)      — facts, inclusions, exclusions, stage claims, red flags, with page/clause + confidence
- *   2. Contract audit  (pass 2)       — independent second reader: corrections, blanks, mis-cited clauses, internal conflicts
- *   3. Drawings index                 — catalogue every sheet + locate schedules
- *   4. Drawings cross-check           — verify contract inclusions against specific sheets (cited)
- *   5. Feasibility cross-check        — are the contract's excluded costs carried in the feasibility?
+ *   1. Contract extract               — facts, inclusions, exclusions, stage claims, red flags, with page/clause + confidence
+ *   2. Drawings index                 — catalogue every sheet + locate schedules
+ *   3. Drawings cross-check           — verify contract inclusions against specific sheets (cited)
+ *   4. Feasibility cross-check        — are the contract's excluded costs carried in the feasibility?
+ *   5. Bill of materials              — organise the extracted inclusions into a per-trade schedule
  *
  * Then buildReview() merges everything into a flat, checklist-ready review with an exceptions list.
  * The API key is server-side only.
@@ -152,12 +152,6 @@ const EXTRACT_INSTRUCTION = `Return JSON exactly in this shape (every leaf value
 "exclusions": costs/works the contract says are NOT the builder's responsibility.
 "inclusions": material items the contract/spec says ARE included — appliances (with brands), SDA/accessibility features, glazing, blinds, flooring, tiling, fencing, driveway, landscaping, services, heating/cooling. List up to ~40 of the most material.`;
 
-const AUDIT_SYSTEM = `You are a SECOND, skeptical construction-contract reviewer. A first reviewer has already produced findings. Your job is to catch what they got wrong or missed. Re-read the contract independently. Assume the first pass contains at least one error or omission and go looking for it. Focus on the known GCC6 / SDA failure points: blank mandatory fields, defects-period vs warranty-annexure conflicts, mis-referenced clause numbers, precedence of special conditions, retention/security + pay-before-keys, liquidated-damages adequacy, commercial-vs-domestic, and base-spec-vs-inclusions conflicts (e.g. glazing).
-
-${CITE}
-
-Return ONLY valid JSON. No markdown.`;
-
 const FEAS_SYSTEM = `You review whether a development feasibility carries the costs a building contract has EXCLUDED. You get the excluded-items list and the feasibility PDF. For each excluded item decide if the feasibility appears to allow for it. Match on meaning, not wording (e.g. "site costs"/"civil works" may cover demolition/stormwater; "authority contributions" may cover council items). Be honest: "no" means a possible gap the proprietor is exposed to; "unclear" means you cannot tell.
 
 ${CITE.replace('extracted value', 'checked value')}
@@ -237,7 +231,6 @@ function mk(group, label, c, finding, forceStatus) {
 function buildReview(a) {
   const items = [];
   const ex = a.extract || {};
-  const audit = a.audit || {};
   const P = ex.parties || {};
   const PR = ex.price || {};
   const D = ex.dates || {};
@@ -314,30 +307,16 @@ function buildReview(a) {
     });
   }
 
-  // Red flags (extract + audit)
-  const flags = [].concat(Array.isArray(ex.redFlags) ? ex.redFlags : [], Array.isArray(audit.additionalRedFlags) ? audit.additionalRedFlags : []);
+  // Red flags (from the contract read)
+  const flags = Array.isArray(ex.redFlags) ? ex.redFlags : [];
   flags.forEach(r => {
     items.push({ id: rid(), group: 'Red flags', label: r.issue || '', value: null, page: r.page || null, clause: r.clause || null, confidence: r.conf || r.confidence || 'medium', finding: r.why || '', severity: r.severity || 'medium', status: 'query', note: '', exception: true });
-  });
-
-  // Audit corrections / blanks / cross-ref / conflicts
-  (audit.corrections || []).forEach(c => {
-    items.push({ id: rid(), group: 'Second-pass discrepancies', label: `Check "${c.field}" — passes disagree`, value: `Pass 1: ${c.pass1Value} · Audit: ${c.auditValue}`, page: c.page || null, clause: null, confidence: c.conf || c.confidence || 'medium', finding: c.why || '', status: 'query', note: '', exception: true });
-  });
-  (audit.blanksAndMandatoryGaps || []).forEach(b => {
-    items.push({ id: rid(), group: 'Second-pass discrepancies', label: `Blank/mandatory gap: ${b.field}`, value: null, page: b.page || null, clause: null, confidence: 'high', finding: b.note || '', status: 'query', note: '', exception: true });
-  });
-  (audit.crossReferenceErrors || []).forEach(x => {
-    items.push({ id: rid(), group: 'Second-pass discrepancies', label: `Clause cross-reference error`, value: `${x.clauseCiting} cites ${x.citedClause}`, page: x.page || null, clause: x.clauseCiting || null, confidence: 'high', finding: x.note || '', status: 'query', note: '', exception: true });
-  });
-  (audit.internalConflicts || []).forEach(x => {
-    items.push({ id: rid(), group: 'Second-pass discrepancies', label: `Internal conflict: ${x.between}`, value: null, page: x.page || null, clause: null, confidence: 'medium', finding: x.note || '', status: 'query', note: '', exception: true });
   });
 
   // Blind spots
   const blindSpots = items.filter(i => i.confidence === 'low' || i.subStatus === 'not_found' || i.subStatus === 'unclear').map(i => ({ label: i.label, page: i.page }));
 
-  return { items, blindSpots, agreementNote: audit.agreementNote || null };
+  return { items, blindSpots };
 }
 
 // ---------- Per-step endpoints (each is ONE Claude call, so nothing times out) ----------
@@ -357,23 +336,7 @@ app.post('/api/extract', uploadOne('contract'), async (req, res) => {
   } catch (err) { console.error(err); fail(res, 500, err.message || 'Extraction failed.'); }
 });
 
-// 2) Contract audit (independent second read)
-app.post('/api/audit', uploadOne('contract'), async (req, res) => {
-  try {
-    const contract = req.files && req.files.contract && req.files.contract[0];
-    if (!contract) return fail(res, 400, 'A contract PDF is required.');
-    let extract = {};
-    try { extract = JSON.parse(req.body.extract || '{}'); } catch (e) {}
-    // Pass a COMPACT summary of pass 1 (not the whole JSON) so the model isn't choking on a huge blob
-    const flagList = (Array.isArray(extract.redFlags) ? extract.redFlags : [])
-      .map(r => `- ${r.issue || ''}${r.clause ? ' [' + r.clause + ']' : ''}`).join('\n').slice(0, 3000);
-    const auditInstruction = `A first reviewer already flagged these issues in this contract:\n${flagList || '(none provided)'}\n\nRe-read the contract independently and report anything they MISSED or got wrong. Return a single JSON object with these keys (use empty arrays where you have nothing to add):\n{\n  "corrections": [ { "field": string, "pass1Value": string, "auditValue": string, "page": string, "why": string, "conf": "high"|"medium"|"low" } ],\n  "additionalRedFlags": [ { "issue": string, "clause": string, "page": string, "severity": "high"|"medium"|"low", "why": string, "conf": "high"|"medium"|"low" } ],\n  "blanksAndMandatoryGaps": [ { "field": string, "page": string, "note": string } ],\n  "crossReferenceErrors": [ { "clauseCiting": string, "citedClause": string, "page": string, "note": string } ],\n  "internalConflicts": [ { "between": string, "page": string, "note": string } ],\n  "agreementNote": string\n}\n\nCRITICAL: Respond with ONLY the JSON object and nothing else. Your entire reply must start with the character { and end with the character }. Do not write any preamble, explanation, or markdown fences.`;
-    const data = parseJson(await callClaude(AUDIT_SYSTEM, [docBlock(contract, true), { type: 'text', text: auditInstruction }], 8000));
-    ok(res, data, { truncated: !!data.__truncated });
-  } catch (err) { console.error(err); fail(res, 500, err.message || 'Audit failed.'); }
-});
-
-// 3) Drawings index
+// 2) Drawings index
 app.post('/api/drawings-index', uploadOne('drawings'), async (req, res) => {
   try {
     const drawings = req.files && req.files.drawings && req.files.drawings[0];
