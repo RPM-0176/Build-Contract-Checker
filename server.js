@@ -51,12 +51,58 @@ async function callClaude(system, userContent, maxTokens = 6000) {
 
 function parseJson(text) {
   if (!text) return { parseError: true, raw: '' };
-  let t = text.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
-  const candidates = ['{', '['].map(c => t.indexOf(c)).filter(i => i !== -1);
-  const first = candidates.length ? Math.min(...candidates) : -1;
-  const last = Math.max(t.lastIndexOf('}'), t.lastIndexOf(']'));
-  if (first !== -1 && last !== -1) t = t.slice(first, last + 1);
-  try { return JSON.parse(t); } catch (e) { return { parseError: true, raw: text }; }
+  let t = text.replace(/^```(?:json)?/i, '').replace(/```\s*$/i, '').trim();
+  const starts = ['{', '['].map(c => t.indexOf(c)).filter(i => i !== -1);
+  const first = starts.length ? Math.min(...starts) : -1;
+  if (first > 0) t = t.slice(first);
+  // 1) straight parse (with trailing-fence trim)
+  try { return JSON.parse(t); } catch (e) { /* fall through */ }
+  // 2) truncation recovery: close open strings/brackets so partial-but-valid data survives
+  const repaired = repairTruncatedJson(t);
+  if (repaired) { try { const v = JSON.parse(repaired); v.__truncated = true; return v; } catch (e) { /* fall through */ } }
+  return { parseError: true, raw: text };
+}
+
+// Walks the JSON, tracks open braces/brackets and string state, and closes them.
+// If truncation happened mid-value, it drops the last incomplete key/element first.
+function repairTruncatedJson(s) {
+  let inStr = false, esc = false;
+  const stack = [];
+  let lastSafe = -1; // index just after the last completed top-of-stack element (comma/close)
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
+    else if (ch === '}' || ch === ']') { stack.pop(); if (stack.length) lastSafe = i + 1; }
+    else if (ch === ',' && stack.length) lastSafe = i + 1;
+  }
+  let core = s;
+  if (inStr || /[:,]\s*$/.test(s.trimEnd()) || /"\w[^"]*$/.test(s)) {
+    // we're mid-token — cut back to the last completed element
+    if (lastSafe > 0) core = s.slice(0, lastSafe).replace(/,\s*$/, '');
+    else return null;
+  } else {
+    core = s.replace(/,\s*$/, '');
+  }
+  // recompute open structures on the trimmed core
+  inStr = false; esc = false; const close = [];
+  for (let i = 0; i < core.length; i++) {
+    const ch = core[i];
+    if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') close.push('}');
+    else if (ch === '[') close.push(']');
+    else if (ch === '}' || ch === ']') close.pop();
+  }
+  if (inStr) core += '"';
+  while (close.length) core += close.pop();
+  return core;
 }
 
 // document block, optionally cached so a re-send within ~5 min is cheap
@@ -277,14 +323,16 @@ app.post('/api/analyze', upload.fields([{ name: 'contract', maxCount: 1 }, { nam
     const analysis = {}; const warnings = [];
 
     // 1) Extract (pass 1)
-    const p1 = parseJson(await callClaude(EXTRACT_SYSTEM, [docBlock(contract, true), { type: 'text', text: EXTRACT_INSTRUCTION }], 8000));
-    if (p1.parseError) warnings.push('Contract extraction returned non-JSON.');
+    const p1 = parseJson(await callClaude(EXTRACT_SYSTEM, [docBlock(contract, true), { type: 'text', text: EXTRACT_INSTRUCTION }], 16000));
+    if (p1.parseError) warnings.push('Contract extraction could not be read (unparseable response) — treat this run as incomplete and re-run.');
+    else if (p1.__truncated) warnings.push('Contract extraction was long and got cut off; partial data was recovered — some items near the end may be missing. Consider re-running.');
     analysis.extract = p1;
 
     // 2) Audit (pass 2) — reuses cached contract
     const auditInstruction = `The first reviewer produced this (JSON):\n${JSON.stringify(p1).slice(0, 12000)}\n\nRe-read the contract yourself and return JSON:\n{\n  "corrections": [ { "field": string, "pass1Value": string, "auditValue": string, "page": string|null, "why": string, "conf": "high"|"medium"|"low" } ],\n  "additionalRedFlags": [ { "issue": string, "clause": string|null, "page": string|null, "severity": "high"|"medium"|"low", "why": string, "conf": "high"|"medium"|"low" } ],\n  "blanksAndMandatoryGaps": [ { "field": string, "page": string|null, "note": string } ],\n  "crossReferenceErrors": [ { "clauseCiting": string, "citedClause": string, "page": string|null, "note": string } ],\n  "internalConflicts": [ { "between": string, "page": string|null, "note": string } ],\n  "agreementNote": string\n}`;
-    const p2 = parseJson(await callClaude(AUDIT_SYSTEM, [docBlock(contract, true), { type: 'text', text: auditInstruction }], 6000));
-    if (p2.parseError) warnings.push('Contract audit returned non-JSON.');
+    const p2 = parseJson(await callClaude(AUDIT_SYSTEM, [docBlock(contract, true), { type: 'text', text: auditInstruction }], 12000));
+    if (p2.parseError) warnings.push('Contract audit could not be read (unparseable response).');
+    else if (p2.__truncated) warnings.push('Contract audit got cut off; partial data recovered.');
     analysis.audit = p2;
 
     const inclusions = Array.isArray(p1.inclusions) ? p1.inclusions.map(x => x.item) : [];
@@ -296,7 +344,7 @@ app.post('/api/analyze', upload.fields([{ name: 'contract', maxCount: 1 }, { nam
       analysis.drawingsIndex = idx;
       if (inclusions.length) {
         const dInstr = `INDEX OF THE DRAWING SET:\n${JSON.stringify(idx).slice(0, 8000)}\n\nCONTRACT INCLUSIONS TO VERIFY (cite the sheet/page for each):\n${inclusions.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nReturn JSON: { "checks": [ { "item": string, "status": "supported"|"conflict"|"not_found", "page": string|null, "sheet": string|null, "confidence": "high"|"medium"|"low", "note": string } ], "notableOnDrawingsNotInContract": [ { "item": string, "page": string|null } ] }`;
-        const dchk = parseJson(await callClaude(DRAW_CHECK_SYSTEM, [docBlock(drawings, true), { type: 'text', text: dInstr }], 7000));
+        const dchk = parseJson(await callClaude(DRAW_CHECK_SYSTEM, [docBlock(drawings, true), { type: 'text', text: dInstr }], 12000));
         if (dchk.parseError) warnings.push('Drawings cross-check returned non-JSON.');
         analysis.drawingsCheck = dchk;
       } else analysis.drawingsCheck = { skipped: true, reason: 'No inclusions extracted to check.' };
@@ -306,7 +354,7 @@ app.post('/api/analyze', upload.fields([{ name: 'contract', maxCount: 1 }, { nam
     if (feasibility) {
       if (exclusions.length) {
         const fInstr = `CONTRACT-EXCLUDED ITEMS:\n${exclusions.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nReturn JSON: { "checks": [ { "excludedItem": string, "inFeasibility": "yes"|"no"|"unclear", "page": string|null, "confidence": "high"|"medium"|"low", "note": string } ], "overallNote": string }`;
-        const fchk = parseJson(await callClaude(FEAS_SYSTEM, [docBlock(feasibility, false), { type: 'text', text: fInstr }], 6000));
+        const fchk = parseJson(await callClaude(FEAS_SYSTEM, [docBlock(feasibility, false), { type: 'text', text: fInstr }], 10000));
         if (fchk.parseError) warnings.push('Feasibility cross-check returned non-JSON.');
         analysis.feasibilityCheck = fchk;
       } else analysis.feasibilityCheck = { skipped: true, reason: 'No exclusions extracted to check.' };
@@ -346,7 +394,7 @@ app.post('/api/bom', upload.fields([{ name: 'contract', maxCount: 1 }, { name: '
     const content = [docBlock(drawings, true)];
     if (contract) content.push(docBlock(contract, true));
     content.push({ type: 'text', text: BOM_INSTRUCTION });
-    const bom = parseJson(await callClaude(BOM_SYSTEM, content, 8000));
+    const bom = parseJson(await callClaude(BOM_SYSTEM, content, 16000));
     const warnings = [];
     if (bom.parseError) warnings.push('Bill of materials returned non-JSON.');
     res.json({ model: MODEL, generatedAt: new Date().toISOString(), warnings, bom });
