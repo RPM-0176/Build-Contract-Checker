@@ -49,7 +49,7 @@ async function runReview() {
   setStep('audit', 'running');
   try {
     const r = await postForm('/api/audit', { contract: files.contract, extract: JSON.stringify(analysis.extract) });
-    if (r.data.parseError) { analysis.audit = {}; warnings.push('The second-pass audit could not be read this run; the main analysis still ran (it already catches blanks and conflicts).'); setStep('audit', 'warn'); }
+    if (r.data.parseError) { analysis.audit = r.data; warnings.push('The second-pass audit could not be read this run; the main analysis still ran (it already catches blanks and conflicts).'); setStep('audit', 'warn'); }
     else { analysis.audit = r.data; setStep('audit', 'done'); }
   } catch (e) { analysis.audit = {}; warnings.push('Second-pass audit step failed (' + e.message + '); the main analysis still ran.'); setStep('audit', 'warn'); }
 
