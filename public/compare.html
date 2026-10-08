@@ -1,1 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Compare Contracts — Radius PG</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F6F7F8;--surface:#FFFFFF;--ink:#171C22;--ink-soft:#4B555F;
+    --line:#DBE0E5;--line-soft:#EAEDF0;--brand:#17527A;--brand-deep:#0F3A57;
+    --ok:#2F7D52;--ok-bg:#E7F2EB;--warn:#B0700F;--warn-bg:#FBF0DC;
+    --bad:#B23B2E;--bad-bg:#F8E9E7;--na:#7A828C;--na-bg:#EEF0F2;--radius:8px;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:'Inter',system-ui,sans-serif;font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1200px;margin:0 auto;padding:0 24px 120px;}
+  .mast{background:var(--brand-deep);color:#fff;padding:32px 24px 28px;}
+  .mast .inner{max-width:1200px;margin:0 auto;}
+  .eyebrow{font-family:'IBM Plex Mono',monospace;font-size:11.5px;letter-spacing:.22em;text-transform:uppercase;color:#9DC0D6;margin:0 0 10px;}
+  .mast h1{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:28px;line-height:1.04;margin:0;letter-spacing:-.01em;}
+  .mast p.lede{margin:11px 0 0;max-width:72ch;color:#CBDCE8;font-size:14px;}
+  .mast a.back{color:#9DC0D6;font-size:13px;text-decoration:none;display:inline-block;margin-bottom:14px;}
+  .mast a.back:hover{color:#fff;}
+
+  .slots{margin-top:24px;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;}
+  .slot{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;}
+  .slot.filled{border-color:var(--brand);box-shadow:0 0 0 1px var(--brand) inset;}
+  .slot .n{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--brand);}
+  .slot label.pick{display:block;margin-top:8px;cursor:pointer;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:7px 12px;font-size:13px;font-weight:500;color:var(--brand);text-align:center;}
+  .slot label.pick:hover{border-color:var(--brand);background:#F0F5F9;}
+  .slot input[type=file]{display:none;}
+  .slot .fname{margin-top:8px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--na);word-break:break-all;}
+  .slot .fname.set{color:var(--ok);}
+
+  .runbar{margin-top:20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;}
+  .run{font-family:'Inter',sans-serif;font-size:15px;font-weight:600;cursor:pointer;background:var(--brand);color:#fff;border:none;border-radius:7px;padding:12px 26px;}
+  .run:hover:not(:disabled){background:var(--brand-deep);}
+  .run:disabled{opacity:.45;cursor:not-allowed;}
+  .hint{font-size:13px;color:var(--na);}
+
+  .status-box{margin-top:20px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;font-size:14px;}
+  .status-box.err{border-color:var(--bad);background:var(--bad-bg);color:var(--bad);}
+  .step-row{font-size:13.5px;display:flex;align-items:center;gap:9px;color:var(--ink-soft);margin-top:5px;}
+  .step-ic{width:16px;text-align:center;font-family:'IBM Plex Mono',monospace;font-weight:600;}
+  .sd-done .step-ic{color:var(--ok);} .sd-fail .step-ic{color:var(--bad);} .sd-run{color:var(--ink);font-weight:500;}
+  .spinner{width:16px;height:16px;border:2.5px solid var(--line);border-top-color:var(--brand);border-radius:50%;animation:spin .8s linear infinite;display:inline-block;vertical-align:middle;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  .actions{display:flex;gap:8px;margin:22px 0 10px;flex-wrap:wrap;}
+  .actions button{font-family:'Inter',sans-serif;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:8px 14px;border-radius:6px;}
+  .actions button:hover{border-color:var(--brand);color:var(--brand);}
+  .actions .primary{background:var(--brand);border-color:var(--brand);color:#fff;}
+
+  h2.sec{font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:18px;margin:26px 0 10px;border-bottom:2px solid var(--ink);padding-bottom:7px;letter-spacing:-.01em;}
+  .tbl-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;}
+  th,td{text-align:left;padding:9px 13px;border-bottom:1px solid var(--line-soft);vertical-align:top;}
+  thead th{background:#EFF3F6;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-soft);position:sticky;top:0;}
+  tbody th{font-weight:600;color:var(--ink-soft);font-size:12.5px;white-space:nowrap;background:#FBFCFD;}
+  td.num{font-family:'IBM Plex Mono',monospace;text-align:right;white-space:nowrap;}
+  td.miss{color:var(--bad);font-style:italic;}
+  tr.highlight td, tr.highlight th{background:#EAF1F6;}
+  .best{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;background:var(--ok-bg);color:var(--ok);padding:1px 6px;border-radius:4px;margin-left:6px;}
+  .pill{font-family:'IBM Plex Mono',monospace;font-size:10.5px;padding:2px 7px;border-radius:4px;white-space:nowrap;}
+  .p-excluded{background:var(--bad-bg);color:var(--bad);}
+  .p-included{background:var(--ok-bg);color:var(--ok);}
+  .p-ask{background:var(--warn-bg);color:var(--warn);}
+  .contract-head{font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:13.5px;color:var(--ink);}
+  .contract-sub{font-size:11px;color:var(--na);font-weight:400;margin-top:2px;white-space:normal;max-width:220px;}
+  .foot{border-top:1px solid var(--line);padding:16px 24px;text-align:center;font-size:12.5px;color:var(--na);}
+  .note-strip{background:var(--warn-bg);border:1px solid var(--warn);color:#7a4e0a;border-radius:7px;padding:11px 14px;font-size:13px;margin:10px 0;}
+
+  @media print{
+    .slots,.runbar,.status-box,.actions,.foot,.mast a.back{display:none !important;}
+    .mast{background:#fff;color:var(--ink);border-bottom:2px solid var(--ink);padding:0 0 10px;}
+    .eyebrow{color:var(--brand);} .mast p.lede{display:none;}
+    body{background:#fff;font-size:11px;} .wrap{padding:0;max-width:100%;}
+    thead th{position:static;} .tbl-scroll{overflow:visible;}
+    table{font-size:10px;} th,td{padding:4px 6px;}
+  }
+</style>
+</head>
+<body>
+<header class="mast">
+  <div class="inner">
+    <a class="back" href="/">← Back to single-contract review</a>
+    <p class="eyebrow">Radius PG · Development Advisory</p>
+    <h1>Compare Contracts</h1>
+    <p class="lede">Upload up to 5 building contracts (e.g. competing builder quotes for the same job). The tool reads each and lays the key terms, red flags and variation-risk exclusions side by side — including the uncovered variation exposure per builder. A cited draft; confirm before relying on it.</p>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="slots" id="slots"></div>
+  <div class="runbar">
+    <button id="run" class="run" disabled>Compare contracts</button>
+    <span class="hint">Reads each contract (about a minute each). Keep this tab open.</span>
+  </div>
+  <div id="status" class="status-box" hidden></div>
+  <div id="result" hidden></div>
+</main>
+
+<footer class="foot"><span>Radius PG · AI-assisted comparison. Indicative only — confirm figures and disclosures before relying on it.</span></footer>
+
+<script>
+const MAX = 5;
+const slots = [];
+const slotWrap = document.getElementById('slots');
+for (let i = 0; i < MAX; i++) {
+  slots.push(null);
+  const div = document.createElement('div');
+  div.className = 'slot'; div.dataset.i = i;
+  div.innerHTML = `<div class="n">Contract ${i + 1}${i === 0 ? ' · required' : ' · optional'}</div>
+    <label class="pick">Choose PDF<input type="file" accept="application/pdf" data-i="${i}"></label>
+    <div class="fname" data-name="${i}"></div>`;
+  slotWrap.appendChild(div);
+}
+const runBtn = document.getElementById('run');
+const statusBox = document.getElementById('status');
+const resultEl = document.getElementById('result');
+
+document.querySelectorAll('input[type=file]').forEach(inp => {
+  inp.addEventListener('change', () => {
+    const i = +inp.dataset.i; const f = inp.files[0] || null; slots[i] = f;
+    const nameEl = document.querySelector(`[data-name="${i}"]`);
+    const slot = slotWrap.querySelector(`.slot[data-i="${i}"]`);
+    if (f) { nameEl.textContent = `${f.name} · ${(f.size / 1048576).toFixed(1)} MB`; nameEl.classList.add('set'); slot.classList.add('filled'); }
+    else { nameEl.textContent = ''; nameEl.classList.remove('set'); slot.classList.remove('filled'); }
+    runBtn.disabled = slots.filter(Boolean).length < 2;
+  });
+});
+
+runBtn.addEventListener('click', async () => {
+  const files = slots.map((f, i) => ({ f, i })).filter(x => x.f);
+  if (files.length < 2) return;
+  runBtn.disabled = true; resultEl.hidden = true; resultEl.innerHTML = '';
+  const state = files.map(x => ({ name: x.f.name, st: 'pending' }));
+  const draw = () => {
+    statusBox.hidden = false; statusBox.className = 'status-box';
+    statusBox.innerHTML = `<b>Reading contracts…</b>` + state.map(s => {
+      const ic = s.st === 'done' ? '✓' : s.st === 'failed' ? '✕' : s.st === 'running' ? '<span class="spinner"></span>' : '·';
+      const cls = s.st === 'done' ? 'sd-done' : s.st === 'failed' ? 'sd-fail' : s.st === 'running' ? 'sd-run' : '';
+      return `<div class="step-row ${cls}"><span class="step-ic">${ic}</span>${esc(s.name)}</div>`;
+    }).join('');
+  };
+  draw();
+  const contracts = [];
+  for (let k = 0; k < files.length; k++) {
+    state[k].st = 'running'; draw();
+    try {
+      const fd = new FormData(); fd.append('contract', files[k].f);
+      const res = await fetch('/api/extract', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok || !data.data || data.data.parseError) { state[k].st = 'failed'; draw(); continue; }
+      contracts.push({ name: files[k].f.name, extract: data.data });
+      state[k].st = 'done'; draw();
+    } catch (e) { state[k].st = 'failed'; draw(); }
+  }
+  if (contracts.length < 2) { statusBox.className = 'status-box err'; statusBox.innerHTML = 'Could not read at least two contracts. Try again.'; runBtn.disabled = false; return; }
+  try {
+    const res = await fetch('/api/compare', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ contracts }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Compare failed.');
+    statusBox.hidden = true; render(data);
+  } catch (e) { statusBox.className = 'status-box err'; statusBox.innerHTML = esc(e.message); }
+  finally { runBtn.disabled = false; }
+});
+
+let LAST = null;
+function render(d) {
+  LAST = d;
+  const cs = d.contracts;
+  const money = n => n ? '$' + Math.round(n).toLocaleString('en-AU') : '—';
+  const cell = v => (v == null || v === '') ? '<td class="miss">blank</td>' : `<td>${esc(v)}</td>`;
+  const parts = [];
+
+  parts.push(`<div class="actions">
+    <button id="print" class="primary">Print / save PDF</button>
+    <button id="csv">Download CSV</button>
+  </div>`);
+
+  // Headline
+  parts.push(`<h2 class="sec">Headline comparison</h2><div class="tbl-scroll"><table><thead><tr><th>Metric</th>${cs.map(c => `<th><div class="contract-head">${esc(c.contractor || c.file)}</div><div class="contract-sub">${esc(c.file)}</div></th>`).join('')}</tr></thead><tbody>`);
+  const row = (label, fn, cls) => `<tr><th>${label}</th>${cs.map(c => { const v = fn(c); return cls === 'num' ? `<td class="num">${v}</td>` : (v == null || v === '' ? '<td class="miss">blank</td>' : `<td>${esc(v)}</td>`); }).join('')}</tr>`;
+  parts.push(row('Contract price', c => c.priceNum ? money(c.priceNum) : '—', 'num'));
+  parts.push(row('GST', c => c.gst));
+  parts.push(row('Commencement', c => c.commencement));
+  parts.push(row('Practical completion', c => c.completion));
+  parts.push(row('Liquidated damages', c => c.ld));
+  parts.push(row('CAR insurance', c => c.carInsurance == null ? null : c.carInsurance));
+  parts.push(row('Public liability', c => c.publicLiability));
+  parts.push(row('Retention / security', c => c.retention));
+  parts.push(row('Defects liability period', c => c.defects == null ? null : c.defects));
+  parts.push(row('Stage claims total', c => c.stageTotal ? c.stageTotal + '%' : '—', 'num'));
+  parts.push(row('Red flags (high severity)', c => c.redFlagCount + ' (' + c.highSeverityCount + ')', 'num'));
+  parts.push(`</tbody></table></div>`);
+
+  // Variation exposure — the decision block
+  parts.push(`<h2 class="sec">Variation-risk exposure</h2><p class="note-strip">Indicative. "Uncovered exposure" is the sum of the watchlist items this builder does <b>not</b> include (excluded or not mentioned). "All-in indicative" = contract price + uncovered exposure — the comparable number across builders.</p><div class="tbl-scroll"><table><thead><tr><th>Metric</th>${cs.map(c => `<th>${esc(c.contractor || c.file)}</th>`).join('')}</tr></thead><tbody>`);
+  parts.push(row('Contract price', c => money(c.priceNum), 'num'));
+  parts.push(row('Uncovered variation exposure', c => money(c.uncoveredExposure), 'num'));
+  parts.push(`<tr class="highlight"><th>All-in indicative</th>${cs.map(c => `<td class="num">${money(c.allInIndicative)}${c.cheapestAllIn ? '<span class="best">lowest</span>' : ''}</td>`).join('')}</tr>`);
+  parts.push(`</tbody></table></div>`);
+
+  // Watchlist matrix
+  parts.push(`<h2 class="sec">Variation-risk watchlist — per builder</h2><div class="tbl-scroll"><table><thead><tr><th>Item</th><th>Indicative</th>${cs.map(c => `<th>${esc(c.contractor || c.file)}</th>`).join('')}</tr></thead><tbody>`);
+  d.watchlistLabels.forEach((w, idx) => {
+    const pills = cs.map(c => {
+      const item = c.watch[idx] || { status: 'ask' };
+      const lbl = item.status === 'excluded' ? 'Excluded' : item.status === 'included' ? 'Included' : 'Ask';
+      return `<td><span class="pill p-${item.status}">${lbl}</span>${item.page ? ` <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--na)">p.${esc(item.page)}</span>` : ''}</td>`;
+    }).join('');
+    parts.push(`<tr><th style="white-space:normal">${esc(w.label)}</th><td class="num">${esc(w.cost || '—')}</td>${pills}</tr>`);
+  });
+  parts.push(`</tbody></table></div>`);
+
+  // Red flags per contract
+  parts.push(`<h2 class="sec">Red flags by contract</h2>`);
+  cs.forEach(c => {
+    parts.push(`<div style="margin-top:12px"><div class="contract-head">${esc(c.contractor || c.file)} <span style="color:var(--na);font-weight:400;font-size:12px">(${c.redFlagCount} flags)</span></div>`);
+    if (!c.redFlags.length) parts.push(`<div style="font-size:13px;color:var(--na);margin-top:4px">None extracted.</div>`);
+    else parts.push('<ul style="margin:6px 0 0;padding-left:18px;font-size:13px">' + c.redFlags.map(f => `<li style="margin-bottom:3px"><b style="color:${f.severity === 'high' ? 'var(--bad)' : f.severity === 'medium' ? 'var(--warn)' : 'var(--na)'}">[${esc(f.severity)}]</b> ${esc(f.issue)}${f.clause ? ` <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--na)">${esc(f.clause)}</span>` : ''}</li>`).join('') + '</ul>');
+    parts.push('</div>');
+  });
+
+  parts.push(`<p style="font-size:12px;color:var(--na);margin-top:24px">Model: ${esc(d.model || '')} · Generated ${esc((d.generatedAt || '').replace('T', ' ').slice(0, 16))}. AI-assisted draft — confirm before relying on it or sending to a client.</p>`);
+
+  resultEl.innerHTML = parts.join('');
+  resultEl.hidden = false;
+  document.getElementById('print').onclick = () => window.print();
+  document.getElementById('csv').onclick = () => downloadCsv(d);
+  resultEl.scrollIntoView({ behavior: 'smooth' });
+}
+
+function downloadCsv(d) {
+  const cs = d.contracts;
+  const esc = s => '"' + String(s == null ? '' : s).replace(/"/g, '""') + '"';
+  const rows = [];
+  rows.push(['Metric', ...cs.map(c => c.contractor || c.file)]);
+  const m = n => n ? Math.round(n) : '';
+  rows.push(['Contract file', ...cs.map(c => c.file)]);
+  rows.push(['Proprietor', ...cs.map(c => c.proprietor)]);
+  rows.push(['Contract price', ...cs.map(c => m(c.priceNum))]);
+  rows.push(['GST', ...cs.map(c => c.gst)]);
+  rows.push(['Commencement', ...cs.map(c => c.commencement)]);
+  rows.push(['Practical completion', ...cs.map(c => c.completion)]);
+  rows.push(['Liquidated damages', ...cs.map(c => c.ld)]);
+  rows.push(['CAR insurance', ...cs.map(c => c.carInsurance || 'BLANK')]);
+  rows.push(['Public liability', ...cs.map(c => c.publicLiability)]);
+  rows.push(['Retention / security', ...cs.map(c => c.retention)]);
+  rows.push(['Defects liability period', ...cs.map(c => c.defects || 'BLANK')]);
+  rows.push(['Stage claims total %', ...cs.map(c => c.stageTotal)]);
+  rows.push(['Red flags', ...cs.map(c => c.redFlagCount)]);
+  rows.push(['High-severity red flags', ...cs.map(c => c.highSeverityCount)]);
+  rows.push(['Uncovered variation exposure', ...cs.map(c => m(c.uncoveredExposure))]);
+  rows.push(['All-in indicative', ...cs.map(c => m(c.allInIndicative))]);
+  rows.push([]);
+  rows.push(['WATCHLIST ITEM', 'Indicative cost', ...cs.map(c => c.contractor || c.file)]);
+  d.watchlistLabels.forEach((w, idx) => {
+    rows.push([w.label, w.cost, ...cs.map(c => (c.watch[idx] || {}).status || 'ask')]);
+  });
+  const csv = rows.map(r => r.map(esc).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'contract-comparison.csv'; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+</script>
+</body>
+</html>
 
